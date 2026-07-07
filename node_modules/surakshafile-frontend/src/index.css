@@ -1,0 +1,46 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+html,
+body,
+#root {
+  min-height: 100%;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+body {
+  @apply bg-slate-950 text-slate-100 antialiased;
+}
+
+::selection {
+  background: rgba(56, 189, 248, 0.35);
+  color: #fff;
+}
+
+.glass-card {
+  @apply rounded-[1.75rem] border border-white/10 bg-white/5 shadow-glow backdrop-blur-xl;
+}
+
+.input-field {
+  @apply mt-2 w-full rounded-2xl border border-white/10 bg-slate-900/80 px-4 py-3 text-slate-100 outline-none transition placeholder:text-slate-500 focus:border-sky-400 focus:ring-2 focus:ring-sky-400/20;
+}
+
+.label-text {
+  @apply text-sm font-medium text-slate-300;
+}
+
+.primary-button {
+  @apply inline-flex items-center justify-center rounded-2xl bg-sky-500 px-5 py-3 font-semibold text-white shadow-lg shadow-sky-500/20 transition hover:bg-sky-400 focus:outline-none focus:ring-2 focus:ring-sky-400/40 disabled:cursor-not-allowed disabled:opacity-60;
+}
+
+.secondary-button {
+  @apply inline-flex items-center justify-center rounded-2xl border border-white/10 bg-white/5 px-5 py-3 font-semibold text-slate-100 transition hover:border-white/20 hover:bg-white/10 focus:outline-none focus:ring-2 focus:ring-sky-400/30;
+}

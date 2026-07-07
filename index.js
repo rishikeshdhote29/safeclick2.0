@@ -1,1 +1,2 @@
-console.log('Happy developing ✨')
+require('./backend/src/server');
+

@@ -1,10 +1,20 @@
 {
-  "name": "rntu",
+  "name": "surakshafile",
   "version": "1.0.0",
-  "description": "",
+  "private": true,
   "main": "index.js",
+  "workspaces": [
+    "backend",
+    "frontend"
+  ],
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "dev": "concurrently \"npm run dev --workspace backend\" \"npm run dev --workspace frontend\"",
+    "dev:backend": "npm run dev --workspace backend",
+    "dev:frontend": "npm run dev --workspace frontend",
+    "start": "npm start --workspace backend",
+    "build": "npm run build --workspace frontend"
   },
-  "private": true
+  "devDependencies": {
+    "concurrently": "^9.1.2"
+  }
 }
