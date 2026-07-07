@@ -6,7 +6,6 @@ const evidenceRouter = require('./routes/evidence');
 const jurisdictionRouter = require('./routes/jurisdiction');
 const authRouter = require('./routes/auth');
 const auditRouter = require('./routes/audit');
-const { uploadsRoot } = require('./config/paths');
 
 const app = express();
 
@@ -23,8 +22,6 @@ app.use((req, res, next) => {
   res.setHeader('Referrer-Policy', 'no-referrer');
   return next();
 });
-
-app.use('/uploads', express.static(uploadsRoot()));
 
 app.get('/health', (req, res) => {
   res.json({ ok: true, service: 'SuRakshaFile API' });

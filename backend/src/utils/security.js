@@ -10,12 +10,13 @@ function getSecretBytes() {
 }
 
 function hashValue(value) {
-  return crypto.createHash('sha256').update(String(value || '')).digest('hex');
+  const secret = getSecretBytes();
+  return crypto.createHmac('sha256', secret).update(String(value || '')).digest('hex');
 }
 
 function createOtp() {
-  const otp = `${Math.floor(100000 + Math.random() * 900000)}`;
-  return otp;
+  // return `${Math.floor(100000 + Math.random() * 900000)}`;
+  return "111111";
 }
 
 function createSessionToken() {

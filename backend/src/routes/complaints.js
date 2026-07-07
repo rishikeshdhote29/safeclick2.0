@@ -178,20 +178,6 @@ router.get('/:id', async (req, res, next) => {
     }
 
     const evidences = await Evidence.find({ complaintId: complaint._id }).sort({ uploadedAt: -1 }).lean();
-    await Evidence.updateMany(
-      { complaintId: complaint._id },
-      {
-        $push: {
-          custodyLog: {
-            action: 'viewed',
-            timestamp: new Date(),
-            actor: req.user.displayName,
-            actorRole: req.user.role,
-            note: 'Evidence viewed in complaint detail',
-          },
-        },
-      }
-    );
 
     await writeAuditLog({
       req,
@@ -276,6 +262,9 @@ router.patch('/:id/status', requireRole([ROLES.SUPPORT, ROLES.POLICE, ROLES.ADMI
       const now = new Date();
       complaint.closure.closedAt = now;
       complaint.closure.retentionDeleteAfter = new Date(now.getTime() + retentionDays * 24 * 60 * 60 * 1000);
+    } else {
+      complaint.closure.closedAt = null;
+      complaint.closure.retentionDeleteAfter = null;
     }
 
     await complaint.save();
@@ -301,11 +290,6 @@ router.get('/:id/package', async (req, res, next) => {
     const complaint = await loadAccessibleComplaint(req, res, req.params.id);
     if (!complaint) {
       return null;
-    }
-
-    if (complaint.status !== 'package-ready') {
-      complaint.status = 'package-ready';
-      await complaint.save();
     }
 
     const evidences = await Evidence.find({ complaintId: complaint._id }).sort({ uploadedAt: 1 }).lean();

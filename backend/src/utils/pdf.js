@@ -52,12 +52,41 @@ function drawWrappedText(page, text, x, y, options) {
   return y - lines.length * lineHeight;
 }
 
+/**
+ * Draws one table row whose height adapts to its tallest (possibly wrapped)
+ * cell, vertically centers each cell's text block, and returns the y
+ * coordinate for the *next* row so callers never have to hardcode a
+ * row-advance amount that can drift out of sync with the drawn height.
+ */
 function createTableRow(page, cells, config) {
-  const { x, y, colWidths, font, fontSize, rowHeight, header = false } = config;
-  let cursorX = x;
+  const {
+    x,
+    y,
+    colWidths,
+    font,
+    fontSize,
+    minRowHeight = 24,
+    cellPaddingX = 6,
+    cellPaddingY = 6,
+    lineGap = 2,
+    header = false,
+  } = config;
 
-  cells.forEach((cell, index) => {
-    const width = colWidths[index];
+  const lineHeight = fontSize + lineGap;
+
+  // 1) Pre-wrap every cell so we know how tall this row actually needs to be.
+  const cellLines = cells.map((cell, index) => {
+    const maxWidth = colWidths[index] - cellPaddingX * 2;
+    return wrapLines(String(cell ?? '-'), font, fontSize, maxWidth);
+  });
+
+  const maxLines = Math.max(1, ...cellLines.map((lines) => lines.length));
+  const contentHeight = maxLines * lineHeight;
+  const rowHeight = Math.max(minRowHeight, contentHeight + cellPaddingY * 2);
+
+  // 2) Draw cell backgrounds/borders using the computed row height.
+  let cursorX = x;
+  colWidths.forEach((width) => {
     page.drawRectangle({
       x: cursorX,
       y: y - rowHeight,
@@ -67,15 +96,165 @@ function createTableRow(page, cells, config) {
       borderColor: rgb(0.8, 0.84, 0.88),
       color: header ? rgb(0.93, 0.96, 0.99) : rgb(1, 1, 1),
     });
-    drawWrappedText(page, cell, cursorX + 6, y - 14, {
-      font,
-      size: fontSize,
-      maxWidth: width - 12,
-      color: rgb(0.12, 0.12, 0.12),
-      lineGap: 2,
-    });
     cursorX += width;
   });
+
+  // 3) Draw text, vertically centered within the row.
+  cursorX = x;
+  cellLines.forEach((lines, index) => {
+    const width = colWidths[index];
+    const blockHeight = lines.length * lineHeight;
+    // Top of the text block, centered in the row, then nudged down to the
+    // first line's baseline (approximated as ~0.8 * fontSize below the cap).
+    const blockTopY = y - (rowHeight - blockHeight) / 2 - fontSize * 0.8;
+
+    lines.forEach((line, lineIndex) => {
+      page.drawText(line, {
+        x: cursorX + cellPaddingX,
+        y: blockTopY - lineIndex * lineHeight,
+        size: fontSize,
+        font,
+        color: rgb(0.12, 0.12, 0.12),
+        maxWidth: width - cellPaddingX * 2,
+      });
+    });
+
+    cursorX += width;
+  });
+
+  return y - rowHeight;
+}
+
+function centerText(page, text, centerX, y, { font, size, color = rgb(0.1, 0.1, 0.1) }) {
+  const textWidth = font.widthOfTextAtSize(text, size);
+  page.drawText(text, {
+    x: centerX - textWidth / 2,
+    y,
+    size,
+    font,
+    color,
+  });
+}
+
+/**
+ * Draws the Section 65B attestation as a single, self-contained certificate
+ * page: bordered like a formal certificate, with a declaration paragraph
+ * that has blanks for name/designation, and a signature block at the
+ * bottom. Nothing else is placed on this page, and nothing on this page
+ * flows past its own fixed layout, so it will always occupy exactly one
+ * fresh page.
+ */
+function drawSection65BCertificatePage(page, { margin, width, boldFont, regularFont, complaintId }) {
+  const pageWidth = page.getWidth();
+  const pageHeight = page.getHeight();
+  const navy = rgb(0.1, 0.25, 0.45);
+  const ink = rgb(0.15, 0.15, 0.15);
+  const centerX = pageWidth / 2;
+
+  // Outer + inner decorative border, certificate-style.
+  const borderInset = margin - 14;
+  page.drawRectangle({
+    x: borderInset,
+    y: borderInset,
+    width: pageWidth - borderInset * 2,
+    height: pageHeight - borderInset * 2,
+    borderWidth: 1.5,
+    borderColor: navy,
+  });
+  page.drawRectangle({
+    x: borderInset + 6,
+    y: borderInset + 6,
+    width: pageWidth - (borderInset + 6) * 2,
+    height: pageHeight - (borderInset + 6) * 2,
+    borderWidth: 0.5,
+    borderColor: navy,
+  });
+
+  let y = pageHeight - margin - 20;
+
+  centerText(page, 'CERTIFICATE UNDER SECTION 65B', centerX, y, { font: boldFont, size: 16, color: navy });
+  y -= 20;
+  centerText(page, 'OF THE INDIAN EVIDENCE ACT, 1872', centerX, y, { font: boldFont, size: 16, color: navy });
+  y -= 22;
+  centerText(page, '(Draft Template — Requires Review and Attestation by Lawful Certifying Authority)', centerX, y, {
+    font: regularFont,
+    size: 9.5,
+    color: ink,
+  });
+  y -= 10;
+
+  // Divider rule under the title block.
+  page.drawLine({
+    start: { x: margin + 30, y },
+    end: { x: pageWidth - margin - 30, y },
+    thickness: 1,
+    color: navy,
+  });
+  y -= 30;
+
+  const paragraphMaxWidth = width - 20;
+  const paragraphX = margin + 10;
+
+  const declaration = `I, ______________________________________________, holding the position/rank of ______________________________________________, do hereby certify, pursuant to Section 65B of the Indian Evidence Act, 1872, that the electronic records annexed to Complaint ID: ${complaintId} were produced from a device or computer system under my lawful control and management, and that, to the best of my knowledge and belief, the said records have not been altered, tampered with, or manipulated during the course of their collection, storage, or transfer.`;
+
+  y = drawWrappedText(page, declaration, paragraphX, y, {
+    font: regularFont,
+    size: 11,
+    maxWidth: paragraphMaxWidth,
+    color: ink,
+    lineGap: 7,
+  }) - 16;
+
+  const notes = [
+    'This certificate is a draft format only and is not, by itself, a completed legal attestation.',
+    'Final execution requires the signature of the lawful certifying person named above, followed by review by the investigating authority prior to court filing.',
+  ];
+  notes.forEach((note) => {
+    y = drawWrappedText(page, note, paragraphX, y, {
+      font: regularFont,
+      size: 9.5,
+      maxWidth: paragraphMaxWidth,
+      color: rgb(0.35, 0.35, 0.35),
+      lineGap: 5,
+    }) - 6;
+  });
+
+  // Signature block, anchored near the bottom of the page.
+  const blockY = margin + 130;
+  const lineLength = (width - 40) / 2 - 10;
+  const leftX = margin + 10;
+  const rightX = margin + 10 + (width - 40) / 2 + 10;
+
+  const signatureRow = (label, x, rowY) => {
+    page.drawLine({
+      start: { x, y: rowY },
+      end: { x: x + lineLength, y: rowY },
+      thickness: 1,
+      color: ink,
+    });
+    page.drawText(label, {
+      x,
+      y: rowY - 14,
+      size: 9,
+      font: regularFont,
+      color: rgb(0.35, 0.35, 0.35),
+    });
+  };
+
+  signatureRow('Name of Declarant', leftX, blockY);
+  signatureRow('Designation / Rank', rightX, blockY);
+  signatureRow('Signature', leftX, blockY - 55);
+  signatureRow('Date', rightX, blockY - 55);
+  signatureRow('Place', leftX, blockY - 110);
+  signatureRow('Police Verification / Reviewing Officer', rightX, blockY - 110);
+
+  centerText(
+    page,
+    `Packet generated on: ${new Date().toLocaleDateString('en-IN')}`,
+    centerX,
+    margin + 20,
+    { font: regularFont, size: 8.5, color: rgb(0.5, 0.5, 0.5) }
+  );
 }
 
 async function generateComplaintPackagePdf({ complaint, evidences }) {
@@ -223,31 +402,21 @@ async function generateComplaintPackagePdf({ complaint, evidences }) {
     ) - 4;
   });
 
-  ensureSpace(160);
-  page.drawText('Section 65B Attestation Workflow (Not Auto-complete)', {
-    x: margin,
-    y,
-    size: 14,
-    font: boldFont,
+  // Section 65B attestation gets its own dedicated, fresh page laid out as
+  // a formal certificate rather than another paragraph in the running text.
+  page = pdfDoc.addPage([595.28, 841.89]);
+  drawSection65BCertificatePage(page, {
+    margin,
+    width,
+    boldFont,
+    regularFont,
+    complaintId: complaint._id,
   });
-  y -= 18;
 
-  const certificateText = [
-    'This packet includes a draft declaration format only.',
-    'Final Section 65B attestation must be signed by the lawful certifying person and reviewed by investigating authority.',
-    'Platform-generated draft text does not by itself satisfy legal attestation requirements.',
-    `Packet generated on: ${new Date().toLocaleDateString('en-IN')}`,
-    'Declarant name/signature/date and police verification are mandatory before court filing.',
-  ];
-
-  certificateText.forEach((line) => {
-    ensureSpace(30);
-    y = drawWrappedText(page, line, margin, y, {
-      font: regularFont,
-      size: 11,
-      maxWidth: width,
-    }) - 4;
-  });
+  // Whatever follows (Chain of Custody, etc.) starts on its own fresh page
+  // too, so the certificate page is never shared with other content.
+  page = pdfDoc.addPage([595.28, 841.89]);
+  y = page.getHeight() - margin;
 
   ensureSpace(180);
   page.drawText('Chain of Custody', {
@@ -258,20 +427,12 @@ async function generateComplaintPackagePdf({ complaint, evidences }) {
   });
   y -= 18;
 
-  const tableWidth = width;
-  const colWidths = [120, 170, 70, 80, 110];
+  // Column widths as proportions of the available content width so the
+  // table can never overflow the right margin, regardless of page size.
+  const colFractions = [0.24, 0.32, 0.14, 0.15, 0.15];
+  const colWidths = colFractions.map((fraction) => fraction * width);
+
   const headers = ['File Name', 'Hash', 'Action', 'Actor Role', 'Timestamp'];
-  const tableStartY = y;
-  createTableRow(page, headers, {
-    x: margin,
-    y: tableStartY,
-    colWidths,
-    font: boldFont,
-    fontSize: 9,
-    rowHeight: 24,
-    header: true,
-  });
-  y -= 24;
 
   const allRows = [];
   evidences.forEach((evidence) => {
@@ -291,17 +452,36 @@ async function generateComplaintPackagePdf({ complaint, evidences }) {
     allRows.push(['No custody records yet', '-', '-', '-', '-']);
   }
 
+  // Redraw the header on every page the table spans, so a page break never
+  // leaves body rows without their column labels.
+  const drawTableHeader = () => {
+    y = createTableRow(page, headers, {
+      x: margin,
+      y,
+      colWidths,
+      font: boldFont,
+      fontSize: 9,
+      minRowHeight: 24,
+      header: true,
+    });
+  };
+
+  drawTableHeader();
+
   allRows.forEach((row) => {
-    ensureSpace(40);
-    createTableRow(page, row, {
+    if (y < margin + 60) {
+      page = pdfDoc.addPage([595.28, 841.89]);
+      y = page.getHeight() - margin;
+      drawTableHeader();
+    }
+    y = createTableRow(page, row, {
       x: margin,
       y,
       colWidths,
       font: regularFont,
       fontSize: 9,
-      rowHeight: 24,
+      minRowHeight: 24,
     });
-    y -= 24;
   });
 
   ensureSpace(220);

@@ -6,6 +6,11 @@ const Complaint = require('../models/Complaint');
 const Evidence = require('../models/Evidence');
 const hashFile = require('../utils/hashFile');
 const { uploadsRoot } = require('../config/paths');
+const {
+  extractEvidenceMetadata,
+  mergeMetadata,
+  listAutoExtractedFields,
+} = require('../utils/extractMetadata');
 const { ROLES, isComplaintOwner, requireRole } = require('../middleware/access');
 const { requireAuth } = require('../middleware/auth');
 const { writeAuditLog } = require('../utils/audit');
@@ -103,8 +108,58 @@ const upload = multer({
   limits: { files: 10, fileSize: 20 * 1024 * 1024 },
 });
 
+const previewUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 20 * 1024 * 1024 },
+});
+
 router.use(requireAuth());
 router.use(requireRole([ROLES.VICTIM, ROLES.SUPPORT, ROLES.POLICE, ROLES.ADMIN]));
+
+router.post(
+  '/:complaintId/extract-metadata',
+  requireRole([ROLES.VICTIM, ROLES.SUPPORT, ROLES.ADMIN]),
+  previewUpload.single('file'),
+  async (req, res, next) => {
+    try {
+      const complaint = await authorizeComplaintAccess(req, req.params.complaintId);
+      if (!complaint) {
+        return res.status(404).json({ message: 'Complaint not found' });
+      }
+
+      if (!req.file) {
+        return res.status(400).json({ message: 'A file is required for metadata extraction' });
+      }
+
+      let manual = {};
+      if (req.body.metadataJson) {
+        try {
+          manual = JSON.parse(req.body.metadataJson);
+        } catch (error) {
+          return res.status(400).json({ message: 'metadataJson must be valid JSON' });
+        }
+      }
+
+      const auto = await extractEvidenceMetadata({
+        buffer: req.file.buffer,
+        originalFilename: req.file.originalname,
+        mimeType: req.file.mimetype,
+        complaint,
+        userAgent: req.headers['user-agent'],
+        lastModified: req.body.lastModified,
+      });
+      const metadata = mergeMetadata(auto, parseEvidenceMetadata(manual));
+
+      return res.json({
+        metadata,
+        autoExtracted: listAutoExtractedFields(auto, metadata),
+        message: 'Metadata extracted automatically from file',
+      });
+    } catch (error) {
+      return next(error);
+    }
+  }
+);
 
 router.post('/:complaintId/upload', requireRole([ROLES.VICTIM, ROLES.SUPPORT, ROLES.ADMIN]), upload.array('files', 10), async (req, res, next) => {
   try {
@@ -118,26 +173,37 @@ router.post('/:complaintId/upload', requireRole([ROLES.VICTIM, ROLES.SUPPORT, RO
       return res.status(400).json({ message: 'At least one file is required' });
     }
 
-    let metadata = {};
+    let manualMetadata = {};
     if (req.body.metadataJson) {
       try {
-        metadata = JSON.parse(req.body.metadataJson);
+        manualMetadata = JSON.parse(req.body.metadataJson);
       } catch (error) {
         cleanupUploadedFiles(req.files);
         return res.status(400).json({ message: 'metadataJson must be valid JSON' });
       }
     } else {
-      metadata = req.body.metadata || req.body;
+      manualMetadata = req.body.metadata || req.body;
     }
-    const parsedMetadata = parseEvidenceMetadata(metadata);
-    const metadataError = validateMetadata(parsedMetadata);
-    if (metadataError) {
-      cleanupUploadedFiles(req.files);
-      return res.status(400).json({ message: metadataError });
-    }
+    const parsedManualMetadata = parseEvidenceMetadata(manualMetadata);
 
-    const createdEvidence = await Promise.all(
-      req.files.map(async (file) => {
+    const createdEvidence = [];
+    const createdIds = [];
+
+    try {
+      for (const file of req.files) {
+        const autoMetadata = await extractEvidenceMetadata({
+          filePath: file.path,
+          originalFilename: file.originalname,
+          mimeType: file.mimetype,
+          complaint,
+          userAgent: req.headers['user-agent'],
+        });
+        const parsedMetadata = mergeMetadata(autoMetadata, parsedManualMetadata);
+        const metadataError = validateMetadata(parsedMetadata);
+        if (metadataError) {
+          throw new Error(metadataError);
+        }
+
         const sha256Hash = hashFile(file.path);
         const evidence = await Evidence.create({
           complaintId: complaint._id,
@@ -146,11 +212,7 @@ router.post('/:complaintId/upload', requireRole([ROLES.VICTIM, ROLES.SUPPORT, RO
           sha256Hash,
           fileSize: file.size,
           mimeType: file.mimetype,
-          metadata: {
-            ...parsedMetadata,
-            fileType: parsedMetadata.fileType || file.mimetype || 'unknown',
-            complaintCategory: parsedMetadata.complaintCategory || complaint.fraudType,
-          },
+          metadata: parsedMetadata,
           uploadedAt: new Date(),
           custodyLog: [
             {
@@ -158,22 +220,33 @@ router.post('/:complaintId/upload', requireRole([ROLES.VICTIM, ROLES.SUPPORT, RO
               timestamp: new Date(),
               actor: req.user.displayName,
               actorRole: req.user.role,
-              note: 'Uploaded and hashed by platform',
+              note: 'Uploaded, hashed, and metadata auto-extracted by platform',
             },
           ],
         });
 
-        return {
+        createdIds.push(evidence._id);
+        createdEvidence.push({
           _id: evidence._id,
           originalFilename: evidence.originalFilename,
           sha256Hash: evidence.sha256Hash,
           fileSize: evidence.fileSize,
           uploadedAt: evidence.uploadedAt,
           metadata: evidence.metadata,
+          autoExtracted: listAutoExtractedFields(autoMetadata, parsedMetadata),
           custodyLog: evidence.custodyLog,
-        };
-      })
-    );
+        });
+      }
+    } catch (uploadError) {
+      if (createdIds.length) {
+        await Evidence.deleteMany({ _id: { $in: createdIds } });
+      }
+      cleanupUploadedFiles(req.files);
+      if (uploadError.message?.startsWith('Missing evidence metadata')) {
+        return res.status(400).json({ message: uploadError.message });
+      }
+      return next(uploadError);
+    }
 
     await writeAuditLog({
       req,
@@ -183,13 +256,18 @@ router.post('/:complaintId/upload', requireRole([ROLES.VICTIM, ROLES.SUPPORT, RO
     });
 
     return res.status(201).json({
-      message: 'Evidence uploaded, hashed, and logged successfully',
+      message: 'Evidence uploaded, metadata auto-extracted, hashed, and logged successfully',
       hashGenerated: true,
+      metadataAutoExtracted: true,
       evidences: createdEvidence,
       provenanceNotice:
         'Hashing confirms integrity after capture/upload. It cannot prove evidence was unaltered before upload; capture source and method are documented for review.',
     });
   } catch (error) {
+    cleanupUploadedFiles(req.files);
+    if (error.message?.startsWith('Missing evidence metadata')) {
+      return res.status(400).json({ message: error.message });
+    }
     return next(error);
   }
 });
@@ -250,6 +328,10 @@ router.get('/:evidenceId/download', requireRole([ROLES.VICTIM, ROLES.SUPPORT, RO
       return res.status(404).json({ message: 'Evidence not found' });
     }
 
+    if (!fs.existsSync(evidence.storagePath)) {
+      return res.status(404).json({ message: 'Evidence file missing from storage' });
+    }
+
     evidence.custodyLog.push({
       action: 'exported',
       timestamp: new Date(),
@@ -265,10 +347,6 @@ router.get('/:evidenceId/download', requireRole([ROLES.VICTIM, ROLES.SUPPORT, RO
       statusCode: 200,
       metadata: { evidenceId: String(evidence._id), complaintId: String(complaint._id) },
     });
-
-    if (!fs.existsSync(evidence.storagePath)) {
-      return res.status(404).json({ message: 'Evidence file missing from storage' });
-    }
 
     return res.download(evidence.storagePath, evidence.originalFilename);
   } catch (error) {

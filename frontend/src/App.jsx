@@ -1,13 +1,26 @@
 import { useEffect, useMemo, useState } from 'react';
 import { api, downloadBlob } from './lib/api';
 import { COMMON_FIELDS, FRAUD_FIELDS, FRAUD_TYPES } from './data/fraudForms';
+import { extractClientMetadata, mergeMetadata, METADATA_FIELDS } from './lib/extractMetadata';
+
+const METADATA_LABELS = {
+  fileType: 'File type',
+  source: 'Source',
+  sourceDevice: 'Source device',
+  collectedAt: 'Collected at',
+  transactionId: 'Transaction ID',
+  platformName: 'Platform name',
+  complaintCategory: 'Complaint category',
+  captureMethod: 'Capture method',
+  captureLimitations: 'Capture limitations',
+};
 
 const STATUS_OPTIONS = ['submitted', 'under-review', 'forwarded', 'accepted', 'rejected', 'pending-clarification', 'package-ready'];
 
 const LANG = {
   en: {
-    title: 'Cyber complaint support workspace',
-    subtitle: 'Improves complaint quality and evidence readiness for victim, NGO/support, police, and admin workflows.',
+    title: 'SuRakshaFile',
+    subtitle: 'Cyber complaint support workspace — improves complaint quality and evidence readiness for victim, NGO/support, police, and admin workflows.',
     login: 'Secure login with OTP',
     role: 'Role',
     id: 'Identifier (phone/email)',
@@ -19,11 +32,11 @@ const LANG = {
     createCase: 'Create / update complaint',
     evidenceMeta: 'Evidence metadata',
     help: 'Help and next steps',
-    noGuarantee: 'This tool does not guarantee FIR or conviction; it prepares better documentation for review.',
+    // noGuarantee: 'This tool does not guarantee FIR or conviction; it prepares better documentation for review.',
   },
   hi: {
-    title: 'साइबर शिकायत सहायता वर्कस्पेस',
-    subtitle: 'यह सिस्टम शिकायत और साक्ष्य को बेहतर बनाता है: पीड़ित, NGO/सपोर्ट, पुलिस और एडमिन के लिए।',
+    title: 'SuRakshaFile',
+    subtitle: 'साइबर शिकायत सहायता वर्कस्पेस — यह सिस्टम शिकायत और साक्ष्य को बेहतर बनाता है: पीड़ित, NGO/सपोर्ट, पुलिस और एडमिन के लिए।',
     login: 'OTP के साथ सुरक्षित लॉगिन',
     role: 'भूमिका',
     id: 'पहचान (फोन/ईमेल)',
@@ -140,6 +153,9 @@ export default function App() {
   const [statusOfficerName, setStatusOfficerName] = useState('');
   const [statusRecipientUnit, setStatusRecipientUnit] = useState('');
   const [selectedFiles, setSelectedFiles] = useState([]);
+  const [autoExtractedFields, setAutoExtractedFields] = useState([]);
+  const [metadataExtracting, setMetadataExtracting] = useState(false);
+  const [editingEvidenceId, setEditingEvidenceId] = useState('');
   const [message, setMessage] = useState('');
   const [loading, setLoading] = useState(false);
 
@@ -151,6 +167,56 @@ export default function App() {
   const canUpload = roleCanUpload(role);
   const canUpdateStatus = roleCanUpdateStatus(role);
   const canEditEvidenceMetadata = roleCanEditEvidenceMetadata(role);
+
+  async function extractMetadataForFiles(files) {
+    if (!files.length) {
+      setAutoExtractedFields([]);
+      return;
+    }
+
+    const firstFile = files[0];
+    const clientMeta = extractClientMetadata(firstFile, activeComplaint);
+    const merged = mergeMetadata(clientMeta, {
+      ...evidenceMeta,
+      complaintCategory: activeComplaint?.fraudType || fraudType || clientMeta.complaintCategory,
+    });
+    setEvidenceMeta(merged);
+    setAutoExtractedFields(Object.keys(clientMeta).filter((key) => clientMeta[key]));
+
+    if (!activeComplaintId || !token) {
+      return;
+    }
+
+    setMetadataExtracting(true);
+    try {
+      const formData = new FormData();
+      formData.append('file', firstFile);
+      formData.append('lastModified', String(firstFile.lastModified || ''));
+      formData.append('metadataJson', JSON.stringify(merged));
+      const result = await api.extractEvidenceMetadata(activeComplaintId, formData, token);
+      setEvidenceMeta(result.metadata);
+      setAutoExtractedFields(result.autoExtracted || []);
+      setMessage('Metadata auto-extracted from file. Review and upload when ready.');
+    } catch (error) {
+      setMessage(error.message);
+    } finally {
+      setMetadataExtracting(false);
+    }
+  }
+
+  async function handleFilesSelected(event) {
+    const files = Array.from(event.target.files || []);
+    setSelectedFiles(files);
+    await extractMetadataForFiles(files);
+  }
+
+  function loadEvidenceMetadata(item) {
+    setEvidenceMeta({
+      ...emptyMetadata(),
+      ...(item.metadata || {}),
+    });
+    setAutoExtractedFields([]);
+  }
 
   async function loadComplaints() {
     if (!token) return;
@@ -192,13 +258,26 @@ export default function App() {
     }
   }, [token]);
 
+  useEffect(() => {
+    if (activeComplaint?.fraudType) {
+      setEvidenceMeta((current) => ({
+        ...current,
+        complaintCategory: current.complaintCategory || activeComplaint.fraudType,
+      }));
+    }
+  }, [activeComplaint?.fraudType]);
+
   const requestOtp = async () => {
     setMessage('');
     try {
       const result = await api.requestOtp({ role: loginRole, identifier, displayName });
       setChallengeId(result.challengeId);
       setDevOtp(result.devOtp || '');
-      setMessage(`OTP generated. ${result.devOtp ? `Dev OTP: ${result.devOtp}` : ''}`);
+      setMessage(
+        result.deliveryMethod === 'email'
+          ? result.message
+          : `OTP generated. ${result.devOtp ? `Dev OTP: ${result.devOtp}` : ''}`
+      );
     } catch (error) {
       setMessage(error.message);
     }
@@ -294,6 +373,8 @@ export default function App() {
       await openComplaint(activeComplaintId);
       await loadComplaints();
       setSelectedFiles([]);
+      setAutoExtractedFields([]);
+      setEvidenceMeta(emptyMetadata());
     } catch (error) {
       setMessage(error.message);
     } finally {
@@ -517,14 +598,28 @@ export default function App() {
 
               <div className="glass-card p-6">
                 <h3 className="text-lg font-semibold text-white">{t.evidenceMeta}</h3>
+                <p className="mt-2 text-xs text-slate-400">
+                  Select a file to auto-extract metadata (file type, source, device, capture time, category). You can review or override before upload.
+                </p>
+                {metadataExtracting ? <p className="mt-2 text-xs text-sky-300">Extracting metadata...</p> : null}
                 <div className="mt-4 grid gap-4 md:grid-cols-2">
-                  {Object.keys(evidenceMeta).map((key) => (
+                  {METADATA_FIELDS.map((key) => (
                     <label key={key}>
-                      <span className="label-text">{key}</span>
+                      <span className="label-text flex items-center gap-2">
+                        {METADATA_LABELS[key] || key}
+                        {autoExtractedFields.includes(key) ? (
+                          <span className="rounded-full border border-emerald-400/30 bg-emerald-500/10 px-2 py-0.5 text-[10px] uppercase tracking-wide text-emerald-200">
+                            Auto
+                          </span>
+                        ) : null}
+                      </span>
                       <input
                         className="input-field"
                         value={evidenceMeta[key] || ''}
-                        onChange={(e) => setEvidenceMeta((current) => ({ ...current, [key]: e.target.value }))}
+                        onChange={(e) => {
+                          setEvidenceMeta((current) => ({ ...current, [key]: e.target.value }));
+                          setAutoExtractedFields((current) => current.filter((field) => field !== key));
+                        }}
                       />
                     </label>
                   ))}
@@ -535,12 +630,21 @@ export default function App() {
                     multiple
                     capture="environment"
                     className="block w-full text-sm text-slate-300 file:mr-4 file:rounded-xl file:border-0 file:bg-sky-500 file:px-4 file:py-2 file:text-white"
-                    onChange={(event) => setSelectedFiles(Array.from(event.target.files || []))}
-                    disabled={!activeComplaintId || !canUpload}
+                    onChange={handleFilesSelected}
+                    disabled={!activeComplaintId || !canUpload || metadataExtracting}
                   />
-                  <button type="button" className="primary-button" disabled={!activeComplaintId || !canUpload || loading} onClick={uploadEvidence}>
+                  <button type="button" className="primary-button" disabled={!activeComplaintId || !canUpload || loading || metadataExtracting} onClick={uploadEvidence}>
                     Upload + hash + timestamp
                   </button>
+                  {canEditEvidenceMetadata && editingEvidenceId ? (
+                    <button
+                      type="button"
+                      className="secondary-button"
+                      onClick={() => updateEvidenceMetadata(editingEvidenceId)}
+                    >
+                      Save metadata to selected evidence
+                    </button>
+                  ) : null}
                   <button type="button" className="secondary-button" onClick={downloadPackage} disabled={!activeComplaintId}>
                     Download police packet (PDF)
                   </button>
@@ -560,9 +664,8 @@ export default function App() {
                       key={item._id}
                       type="button"
                       onClick={() => openComplaint(item._id)}
-                      className={`w-full rounded-2xl border p-4 text-left ${
-                        activeComplaintId === item._id ? 'border-sky-400 bg-sky-500/10' : 'border-white/10 bg-slate-900/60'
-                      }`}
+                      className={`w-full rounded-2xl border p-4 text-left ${activeComplaintId === item._id ? 'border-sky-400 bg-sky-500/10' : 'border-white/10 bg-slate-900/60'
+                        }`}
                     >
                       <div className="flex items-center justify-between gap-3">
                         <strong className="text-white">{item.fraudType}</strong>
@@ -616,8 +719,16 @@ export default function App() {
                               Download
                             </button>
                             {canEditEvidenceMetadata ? (
-                              <button className="secondary-button px-3 py-2 text-sm" type="button" onClick={() => updateEvidenceMetadata(item._id)}>
-                                Edit metadata
+                              <button
+                                className="secondary-button px-3 py-2 text-sm"
+                                type="button"
+                                onClick={() => {
+                                  loadEvidenceMetadata(item);
+                                  setEditingEvidenceId(item._id);
+                                  setMessage(`Loaded metadata from ${item.originalFilename} for editing.`);
+                                }}
+                              >
+                                Load for edit
                               </button>
                             ) : null}
                           </div>

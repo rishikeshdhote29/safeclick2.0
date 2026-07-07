@@ -4,16 +4,33 @@ const AuthSession = require('../models/AuthSession');
 const OtpChallenge = require('../models/OtpChallenge');
 const { User, USER_ROLES } = require('../models/User');
 const { requireAuth } = require('../middleware/auth');
+const { ROLES, requireRole } = require('../middleware/access');
 const { createOtp, createSessionToken, hashValue } = require('../utils/security');
 const { writeAuditLog } = require('../utils/audit');
+const { createRateLimiter } = require('../utils/rateLimit');
+const { isEmailIdentifier, isSmtpConfigured, sendOtpEmail } = require('../utils/mail');
 
 const router = express.Router();
+
+const otpRequestLimiter = createRateLimiter({
+  keyFn: (req) => `otp-request:${normalizeIdentifier(req.body.identifier)}:${String(req.body.role || '').trim().toLowerCase()}`,
+  max: 5,
+  windowMs: 15 * 60 * 1000,
+  message: 'Too many OTP requests. Please wait before trying again.',
+});
+
+const otpVerifyLimiter = createRateLimiter({
+  keyFn: (req) => `otp-verify:${String(req.body.challengeId || '').trim()}`,
+  max: 10,
+  windowMs: 15 * 60 * 1000,
+  message: 'Too many OTP verification attempts. Please request a new OTP.',
+});
 
 function normalizeIdentifier(value) {
   return String(value || '').trim().toLowerCase();
 }
 
-router.post('/request-otp', async (req, res, next) => {
+router.post('/request-otp', otpRequestLimiter, async (req, res, next) => {
   try {
     const role = String(req.body.role || '').trim().toLowerCase();
     const identifier = normalizeIdentifier(req.body.identifier);
@@ -31,7 +48,7 @@ router.post('/request-otp', async (req, res, next) => {
 
     const user = await User.findOneAndUpdate(
       { role, identifier },
-      { $set: { displayName } },
+      { $setOnInsert: { displayName } },
       { upsert: true, new: true, setDefaultsOnInsert: true }
     );
 
@@ -42,20 +59,55 @@ router.post('/request-otp', async (req, res, next) => {
       expiresAt: new Date(Date.now() + 5 * 60 * 1000),
     });
 
+    let deliveryMethod = 'none';
+    const identifierIsEmail = isEmailIdentifier(identifier);
+
+    if (identifierIsEmail) {
+      if (isSmtpConfigured()) {
+        try {
+          await sendOtpEmail({ to: identifier, otp, displayName });
+          deliveryMethod = 'email';
+        } catch (error) {
+          console.error('Failed to send OTP email:', error);
+          if (process.env.NODE_ENV !== 'production') {
+            deliveryMethod = 'dev';
+          } else {
+            return res.status(502).json({ message: 'Failed to send OTP email. Check SMTP settings and try again.' });
+          }
+        }
+      } else if (process.env.NODE_ENV !== 'production') {
+        deliveryMethod = 'dev';
+      } else {
+        return res.status(503).json({
+          message: 'Email delivery is not configured. Set GMAIL_USER and APP_PASSWORD in backend/.env.',
+        });
+      }
+    } else if (process.env.NODE_ENV !== 'production') {
+      deliveryMethod = 'dev';
+    } else {
+      return res.status(503).json({
+        message: 'SMS delivery is not configured. Please log in with an email address.',
+      });
+    }
+
     await writeAuditLog({
       req,
       action: 'auth.request_otp',
       statusCode: 200,
-      metadata: { role, identifier },
+      metadata: { role, identifier, deliveryMethod },
     });
 
     const response = {
-      message: 'OTP generated. Verify within 5 minutes.',
+      message:
+        deliveryMethod === 'email'
+          ? 'OTP sent to your email. Verify within 5 minutes.'
+          : 'OTP generated. Verify within 5 minutes.',
       challengeId: challenge._id,
       expiresAt: challenge.expiresAt,
+      deliveryMethod,
     };
 
-    if (process.env.NODE_ENV !== 'production') {
+    if (deliveryMethod === 'dev' && process.env.EXPOSE_DEV_OTP === 'true') {
       response.devOtp = otp;
     }
 
@@ -65,7 +117,7 @@ router.post('/request-otp', async (req, res, next) => {
   }
 });
 
-router.post('/verify-otp', async (req, res, next) => {
+router.post('/verify-otp', otpVerifyLimiter, async (req, res, next) => {
   try {
     const challengeId = String(req.body.challengeId || '').trim();
     const otp = String(req.body.otp || '').trim();

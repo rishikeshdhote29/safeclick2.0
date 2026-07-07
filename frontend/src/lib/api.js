@@ -81,6 +81,12 @@ export const api = {
       token,
       body: formData,
     }),
+  extractEvidenceMetadata: (complaintId, formData, token) =>
+    request(`/api/evidence/${complaintId}/extract-metadata`, {
+      method: 'POST',
+      token,
+      body: formData,
+    }),
   updateEvidenceMetadata: (evidenceId, payload, token) =>
     request(`/api/evidence/${evidenceId}/metadata`, {
       method: 'PATCH',
